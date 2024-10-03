@@ -16,6 +16,7 @@ discovery:
             - 'IOS (tm)'
             - 'Cisco IOS Software'
             - 'Global Site Selector'
+            - 'Cisco'
         sysDescr_except:
             - 'LINUX_IOSD'
             - 'IOS-XE'
