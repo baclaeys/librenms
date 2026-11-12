@@ -1,8 +1,8 @@
 <?php
 
-use App\Facades\DeviceCache;
 use App\Facades\LibrenmsConfig;
 use App\Models\Eventlog;
+use LibreNMS\Enum\PortAssociationMode;
 use LibreNMS\Enum\Severity;
 use LibreNMS\RRD\RrdDefinition;
 use LibreNMS\Util\Debug;
@@ -212,8 +212,8 @@ if ($device['os'] === 'f5' && (version_compare($device['version'], '11.2.0', '>=
 } elseif ($device['os'] === 'exalink-fusion') {
     require 'ports/exalink-fusion.inc.php';
 } else {
-    $selected_ports = DeviceCache::get($device['device_id'] ?? null)->selectedPortPolling();
-    if ($selected_ports->isEnabled()) {
+    $selected_attrib = DeviceCache::get($device['device_id'] ?? null)->getAttrib('selected_ports');
+    if ($selected_attrib !== null ? $selected_attrib == 'true' : LibrenmsConfig::getOsSetting($device['os'], 'polling.selected_ports')) {
         $fetched_data_string .= '(Selected ports polling): ';
 
         // remove the deleted and disabled ports and mark them skipped
@@ -225,7 +225,7 @@ if ($device['os'] === 'f5' && (version_compare($device['version'], '11.2.0', '>=
 
         // only try to guess if we should walk base oids if selected_ports is set only globally
         $walk_base = false;
-        if ($selected_ports->os === null && $selected_ports->device === null) {
+        if (! LibrenmsConfig::has("os.{$device['os']}.polling.selected_ports") && $selected_attrib === null) {
             // if less than 5 ports or less than 10% of the total ports are skipped, walk the base oids instead of get
             $polled_port_count = count($polled_ports);
             $total_port_count = count($ports);
@@ -286,15 +286,20 @@ if ($device['os'] === 'f5' && (version_compare($device['version'], '11.2.0', '>=
         $fetched_data_string .= '(Full ports polling): ';
         // For devices that are on the bad_ifXentry list, try fetching ifAlias to have nice interface descriptions.
 
-        if (! in_array(strtolower($device['hardware'] ?? ''), array_map(strtolower(...), (array) LibrenmsConfig::getOsSetting($device['os'], 'bad_ifXEntry', [])))) {
+        $bad_if_x_entry = in_array(strtolower($device['hardware'] ?? ''), array_map(strtolower(...), (array) LibrenmsConfig::getOsSetting($device['os'], 'bad_ifXEntry', [])));
+        if (! $bad_if_x_entry) {
             $port_stats = snmpwalk_cache_oid($device, 'ifXEntry', $port_stats, 'IF-MIB');
         } else {
             $port_stats = snmpwalk_cache_oid($device, 'ifAlias', $port_stats, 'IF-MIB', null, '-OQUst');
             $port_stats = snmpwalk_cache_oid($device, 'ifName', $port_stats, 'IF-MIB', null, '-OQUst');
         }
-        $hc_test = array_slice($port_stats, 0, 1);
-        // If the device doesn't have ifXentry data, fetch ifEntry instead.
-        if (! is_numeric($hc_test[0]['ifHCInOctets'] ?? null) || ! is_numeric($hc_test[0]['ifHighSpeed'] ?? null)) {
+        // If IF-X data is absent or incomplete, fetch the standard IF-MIB table instead.
+        if ($bad_if_x_entry || ! has_complete_if_x_entry($port_stats, $ports)) {
+            if (! $bad_if_x_entry) {
+                // Do not retain partial IF-X values such as incorrect interface names.
+                $port_stats = [];
+            }
+
             $ifEntrySnmpFlags = ['-OQUst'];
             if ($device['os'] == 'bintec-beip-plus') {
                 $ifEntrySnmpFlags = ['-OQUst', '-Cc'];
@@ -464,7 +469,10 @@ d_echo($port_stats);
 // The port association configuration allows to choose between association via ifIndex, ifName,
 // or maybe other means in the future. The default port association mode still is ifIndex for
 // compatibility reasons.
-$port_association_mode = DeviceCache::get($device['device_id'] ?? null)->polling()->snmp()->portAssociationMode;
+$port_association_mode = LibrenmsConfig::get('default_port_association_mode');
+if ($device['port_association_mode']) {
+    $port_association_mode = PortAssociationMode::getName($device['port_association_mode']);
+}
 
 $ports_found = [];
 // New interface detection
@@ -902,7 +910,7 @@ foreach ($ports as $port) {
             $fields['ifOutBits_rate'] = $current_port_stats['ifOutBits_rate'];
 
             if ($tune_port === true) {
-                Rrd::tune($rrdfile, \LibreNMS\RRD\PortRrd::tuneLimits((int) $this_port['ifSpeed']));
+                Rrd::tune('port', $rrdfile, $this_port['ifSpeed']);
             }
 
             $tags = [
